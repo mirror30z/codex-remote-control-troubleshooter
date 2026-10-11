@@ -2,6 +2,26 @@
 
 Use this reference only for the branch suggested by the current symptom and diagnostic report. The bundled script is read-only; it cannot prove that an authenticated Remote Control WebSocket or mobile session succeeded.
 
+## Probe interpretation
+
+The script disables curl's default configuration and explicitly selects direct or proxy mode, overriding the diagnostic shell's `NO_PROXY`. The direct label means curl does not use an explicit proxy; an active TUN or VPN may still capture it. HTTP CONNECT responses alone do not prove the upstream application answered. No curl, skipped probes, PAC-only configuration, DNS query errors, and route query errors are missing evidence. `socks5` uses local name resolution while `socks5h` asks the proxy to resolve the destination, so differing results may involve both DNS and routing.
+
+DNS and connection results are snapshots. HTTPS proxies can resolve names differently from Windows; local proxy connections and helper processes are not covered by the narrow Codex/ChatGPT-to-resolved-address filter. A custom `-Endpoint` changes the queried hostname; the default path is internal and may change between app versions. Verify a `404` or `410` against current app evidence before treating it as a networking failure.
+
+## Change and rollback record
+
+Before changing settings, record the exact previous value and chosen scope. Apply one change, rerun the same diagnostics in the new state, and verify the desktop and phone. If the result worsens or does not help, restore the previous state before trying another branch.
+
+| Change | Record before changing | Rollback |
+| --- | --- | --- |
+| TUN or app/domain routing | Existing mode and affected rules | Restore mode/rules and reload the proxy |
+| Fake-IP address pool | Original pool and conflicting route evidence | Restore pool, reload proxy stack, flush cached DNS, retest |
+| Adapter DNS or interception | Adapter identity, automatic/manual DNS state, servers/rules | Restore original automatic/manual state and rules |
+| Process-scoped launcher | Original shortcut/launcher and per-process environment | Restore launcher and reopen app after saving active work |
+| Temporary VPN pause | Whether that VPN is needed for current remote/work access | Reconnect VPN and verify previous access |
+
+Avoid changes that would disconnect the only remote session. If a required enterprise policy blocks the tested path, report the evidence to the administrator rather than deleting routes or bypassing controls.
+
 ## DNS mismatch or IPv6 path
 
 Compare the Windows default A and AAAA answers with `-DnsServer` only when the user's proxy exposes a known DNS listener. `127.0.0.1` is not a universal Clash DNS address. Confirm the proxy's DNS mode before treating a public answer as suspicious; Fake-IP is optional. A mismatch can come from an adapter DNS server, IPv6 DNS, a PAC configuration, or the proxy's own rules. Inspect the active adapter's DNS and route, then change only the proven faulty rule. Do not disable IPv6 or point all adapters at loopback as a blanket fix; that can break other networks.

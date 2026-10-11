@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Remote Control 排查"
+  short_description: "Diagnose Windows pairing, proxy, DNS and offline errors"
+  default_prompt: "Use $codex-remote-control-fix 排查我的 Windows 远程控制报错，先收集证据，再给出修复和回滚步骤。"

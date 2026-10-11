@@ -1,5 +1,7 @@
 # Codex Remote Control 无法启用：Windows 排查 Skill
 
+支持 Windows PowerShell 5.1 / PowerShell 7。先确认桌面端设置、登录状态、版本和休眠，再按证据排查网络；每次修复保留原值与回滚方法。
+
 **English:** A Codex skill for Windows Remote Control setup, availability, and phone-offline failures. It separates proxy/TUN bypass, DNS and IPv6 paths, Fake-IP route collisions, WebSocket or Cloudflare challenges, and account or workspace pairing issues.
 
 在 Windows 版 ChatGPT/Codex Desktop 点击“允许”后，若出现 **“无法启用远程控制。请重试”**，可以安装这个 Codex skill，让 Codex 先收集只读诊断信息，再根据实际结果选择修复方法。
@@ -60,11 +62,21 @@ $codex-remote-control-fix 帮我排查 Windows 上“无法启用远程控制。
 
 也可以手动把 [`skills/codex-remote-control-fix`](skills/codex-remote-control-fix) 文件夹复制到 `~/.codex/skills/`。Skill 包含可选的只读 PowerShell 诊断脚本；它不会自动修改 VPN、路由、防火墙或代理设置。
 
-直接运行诊断脚本的示例：
+在发生故障的 Windows 电脑上，用普通权限的 PowerShell 运行诊断脚本。不要在 WSL 或云端容器中代替这台电脑采集：
 
 ```powershell
 & ".\skills\codex-remote-control-fix\scripts\diagnose.ps1"
 ```
+
+跳过端点 HTTP 探测，只收集本机状态和 DNS 查询结果：
+
+```powershell
+& ".\skills\codex-remote-control-fix\scripts\diagnose.ps1" -SkipProbes
+```
+
+脚本会读取 DNS、路由、代理配置及进程状态，并默认发送不带登录凭据的 HTTP 探测；不会读取应用令牌或修改网络。JSON 报告仍可能包含内网地址、网卡名称等信息，公开前应脱敏。权限不足或缺少命令会留下错误字段，不能当成“没有问题”。系统 PAC 不会被自动求值，需要确认实际代理后再指定 `-ProxyUrl`；参数不接受带账号密码的 URL。
+
+默认探测路径是观察到的内部端点，并非稳定公开 API。遇到 `404` / `410`，应结合当前应用日志确认路径后，再用 `-Endpoint` 指定不含凭据或查询参数的 HTTPS URL。所谓直连是“不显式使用代理”，仍可能经过已开启的 TUN / VPN。
 
 若已从代理软件确认其 DNS 监听地址，可追加 `-DnsServer <地址>`；若需指定显式代理，可追加 `-ProxyUrl http://127.0.0.1:<端口>`。不要把示例端口用于未确认的代理。
 
@@ -73,6 +85,18 @@ $codex-remote-control-fix 帮我排查 Windows 上“无法启用远程控制。
 安装 skill 会让 Codex 知道如何定位这类故障，并在证据充分时执行或指导对应修复。它不能保证所有远程控制失败都来自网络，也不能替用户完成账号验证、工作区管理员授权或手机扫码。最终以桌面端出现配对码、手机连接成功并完成一次实际操作为准。
 
 电脑端需要保持运行、联网且不休眠。配对、账号和工作区要求见 [OpenAI Remote connections 官方文档](https://learn.chatgpt.com/docs/remote-connections)。
+
+官方文档还说明：退出登录会关闭 Remote Control，但保留配对；重新登录后需再次开启。移动端配对从桌面应用开始，不能从 CLI / IDE 直接设置。遇到开启后选择 Add 的报错，可先保存当前工作，再重启桌面应用重试。产品入口名称可能随版本变化，以当前官方文档和应用界面为准。
+
+## 验证与维护
+
+仓库的 GitHub Actions 在 Windows PowerShell 5.1 和 PowerShell 7 下验证脚本语法、代理解析、探测参数隔离、挑战响应、错误脱敏、本地端口检测和 JSON 输出。测试不会尝试登录或配对。
+
+```powershell
+& ".\tests\diagnose.Tests.ps1"
+```
+
+这些测试验证诊断脚本；真实恢复仍需桌面端启用成功、手机显示在线，并从手机完成一次实际操作。反馈故障时，请提供版本、错误原文及时间、当前代理/VPN 模式和脱敏后的关键字段。
 
 **English search terms:** ChatGPT Codex Remote Control cannot enable on Windows, unable to update remote control availability, Codex mobile host offline, mobile pairing, WebSocket timeout, Cloudflare Cf-Mitigated challenge, DNS leak, IPv6, proxy TUN, Clash Fake-IP, aTrust route conflict.
 

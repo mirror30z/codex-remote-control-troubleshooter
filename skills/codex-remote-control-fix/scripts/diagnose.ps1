@@ -1,7 +1,9 @@
+[CmdletBinding()]
 param(
     [string]$Endpoint = 'https://chatgpt.com/backend-api/wham/remote/control/server',
     [string]$ProxyUrl,
-    [string]$DnsServer
+    [string]$DnsServer,
+    [switch]$SkipProbes
 )
 
 $ErrorActionPreference = 'Stop'
@@ -10,49 +12,84 @@ if ([Environment]::OSVersion.Platform -ne 'Win32NT') {
     throw 'This diagnostic runs on Windows only.'
 }
 
+function ConvertTo-SafeUri {
+    param([string]$Value, [string[]]$Schemes)
+    $uri = $null
+    if ([uri]::TryCreate($Value, [UriKind]::Absolute, [ref]$uri) -and
+        $uri.Scheme -in $Schemes -and $uri.Host -and $uri.Port -gt 0 -and
+        $uri.DnsSafeHost -notmatch '(^|\.)diagnostic\.invalid$' -and
+        -not $uri.UserInfo -and -not $uri.Query -and -not $uri.Fragment) {
+        return $uri
+    }
+    return $null
+}
+
+function Get-EndpointProbeArguments {
+    param([string]$Url, [string]$Proxy)
+    # -q must be first: do not load a user's curlrc (cookies, headers, proxy, etc.).
+    $arguments = @('-q', '--silent', '--show-error', '--output', 'NUL', '--dump-header', '-', '--connect-timeout', '8', '--max-time', '12', '--write-out', 'HTTP=%{http_code};TIME=%{time_total}', '--request', 'GET')
+    if ($Proxy) {
+        # A nonmatching entry avoids empty-argument differences in Windows PS 5.1.
+        # Override inherited NO_PROXY even when it contains '*' or the target host.
+        $arguments += @('--proxy', $Proxy, '--noproxy', 'diagnostic.invalid')
+    } else { $arguments += @('--noproxy', '*') }
+    return $arguments + @('--url', $Url)
+}
+
 function Invoke-EndpointProbe {
     param([string]$Label, [string]$Url, [string]$Proxy)
 
     $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
     if (-not $curl) { return [pscustomobject]@{ mode = $Label; status = 'curl.exe unavailable' } }
 
-    $arguments = @('--silent', '--show-error', '--output', 'NUL', '--dump-header', '-', '--connect-timeout', '8', '--max-time', '12', '--write-out', 'HTTP=%{http_code};TIME=%{time_total}', '--request', 'GET')
-    if ($Proxy) { $arguments += @('--proxy', $Proxy) }
-    else { $arguments += @('--noproxy', '*') }
-    $arguments += $Url
+    $arguments = @(Get-EndpointProbeArguments -Url $Url -Proxy $Proxy)
 
     $previousPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
+    # Native failures are captured as evidence, including in PowerShell 7.3+.
+    $PSNativeCommandUseErrorActionPreference = $false
     try {
         $result = & $curl.Source @arguments 2>&1
         $exitCode = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $previousPreference
     }
-    $response = ($result | Where-Object { $_ -is [string] -and $_ -match 'HTTP=\d{3}' } | Select-Object -Last 1)
-    $errorText = ($result | Where-Object { "$_" -match 'curl: \(' } | Select-Object -First 1)
+    return ConvertFrom-EndpointProbeOutput -Label $Label -Lines $result -ExitCode $exitCode
+}
+
+function ConvertFrom-EndpointProbeOutput {
+    param([string]$Label, [object[]]$Lines, [int]$ExitCode)
+    $result = @($Lines | ForEach-Object { "$_" })
+    $response = ($result | Where-Object { $_ -match '^HTTP=\d{3};TIME=[\d.]+$' } | Select-Object -Last 1)
     $challenge = ($result | Where-Object { "$_" -match '^cf-mitigated:\s*challenge\s*$' } | Select-Object -Last 1)
     return [pscustomobject]@{
         mode = $Label
-        exitCode = $exitCode
+        exitCode = $ExitCode
         result = if ($response) { "$response" } else { 'no HTTP response' }
         cloudflareChallenge = [bool]$challenge
-        error = if ($errorText) { ("$errorText" -replace 'https?://\S+', '<URL>') } else { $null }
+        # Do not include raw stderr, which may contain credentials or URLs.
+        error = if ($ExitCode -ne 0) { "curl failed with exit code $ExitCode; inspect locally if needed." } else { $null }
     }
 }
 
 function Resolve-ProxyUrl {
     param([string]$Explicit, [object]$Settings)
 
-    if ($Explicit) { return $Explicit }
+    if ($Explicit) {
+        $uri = ConvertTo-SafeUri -Value $Explicit -Schemes @('http', 'https', 'socks5', 'socks5h')
+        if (-not $uri -or $uri.AbsolutePath -ne '/') {
+            throw 'ProxyUrl must be an HTTP(S) or SOCKS5 URL with a host and port, without credentials, query, fragment, or path.'
+        }
+        return $uri.AbsoluteUri.TrimEnd('/')
+    }
     if ($Settings.ProxyEnable -ne 1 -or -not $Settings.ProxyServer) { return $null }
     $entry = [string]$Settings.ProxyServer
     if ($entry -match '(?:^|;)https=([^;]+)') { $entry = $Matches[1] }
     elseif ($entry -match ';') { return $null }
     if ($entry -notmatch '^[a-z]+://') { $entry = "http://$entry" }
     try {
-        $uri = [uri]$entry
-        if ($uri.Host -and $uri.Port -gt 0) { return $uri.AbsoluteUri.TrimEnd('/') }
+        $uri = ConvertTo-SafeUri -Value $entry -Schemes @('http', 'https', 'socks5', 'socks5h')
+        if ($uri -and $uri.AbsolutePath -eq '/') { return $uri.AbsoluteUri.TrimEnd('/') }
     } catch {}
     return $null
 }
@@ -73,13 +110,44 @@ function Get-DnsAnswers {
     return [pscustomobject]$answers
 }
 
+function Test-LocalProxyListener {
+    param([string]$ComputerName, [int]$Port)
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        $pending = $client.BeginConnect($ComputerName, $Port, $null, $null)
+        try {
+            if (-not $pending.AsyncWaitHandle.WaitOne(1500)) { return $false }
+            $client.EndConnect($pending)
+            return $client.Connected
+        } finally { $pending.AsyncWaitHandle.Close() }
+    } catch { return $false }
+    finally { $client.Close() }
+}
+
+function Test-IsLoopbackHost {
+    param([string]$HostName)
+    if ($HostName -eq 'localhost') { return $true }
+    $address = $null
+    return ([System.Net.IPAddress]::TryParse($HostName, [ref]$address) -and
+        [System.Net.IPAddress]::IsLoopback($address))
+}
+
+$endpointUri = ConvertTo-SafeUri -Value $Endpoint -Schemes @('https')
+if (-not $endpointUri) { throw 'Endpoint must be an HTTPS URL without credentials, query, or fragment.' }
+$settings = Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction SilentlyContinue
+$effectiveProxy = Resolve-ProxyUrl -Explicit $ProxyUrl -Settings $settings
+
 $report = [ordered]@{
+    schemaVersion = 2
     collectedAt = (Get-Date).ToString('o')
     os = 'Windows'
+    powerShellVersion = $PSVersionTable.PSVersion.ToString()
+    endpointHost = $endpointUri.DnsSafeHost
     dns = $null
     alternateDns = $null
     adapterDnsServers = @()
     selectedRoutes = @()
+    routeErrors = @()
     virtualAdapters = @()
     relevantServices = @()
     systemProxy = $null
@@ -88,13 +156,14 @@ $report = [ordered]@{
     codexProcesses = @()
     codexDomainConnections = @()
     probes = @()
+    probesSkipped = [bool]$SkipProbes
 }
 
-$report.dns = Get-DnsAnswers -Name 'chatgpt.com'
+$report.dns = Get-DnsAnswers -Name $endpointUri.DnsSafeHost
 if ($DnsServer) {
     $report.alternateDns = [pscustomobject]@{
         server = $DnsServer
-        answers = Get-DnsAnswers -Name 'chatgpt.com' -Server $DnsServer
+        answers = Get-DnsAnswers -Name $endpointUri.DnsSafeHost -Server $DnsServer
     }
 }
 
@@ -107,8 +176,8 @@ try {
         Select-Object InterfaceIndex, InterfaceAlias, AddressFamily, ServerAddresses)
 } catch { $report.adapterDnsError = $_.Exception.Message }
 
-try {
-    foreach ($address in @($report.dns.A) + @($report.dns.AAAA)) {
+foreach ($address in @($report.dns.A) + @($report.dns.AAAA)) {
+    try {
         $routes = @(Find-NetRoute -RemoteIPAddress $address -ErrorAction Stop | Where-Object { $_.DestinationPrefix })
         foreach ($route in $routes) {
             $report.selectedRoutes += [pscustomobject]@{
@@ -119,8 +188,10 @@ try {
                 nextHop = $route.NextHop
             }
         }
+    } catch {
+        $report.routeErrors += [pscustomobject]@{ remoteAddress = $address; error = $_.Exception.Message }
     }
-} catch { $report.routeError = $_.Exception.Message }
+}
 
 try {
     $report.codexProcesses = @(Get-Process -ErrorAction Stop |
@@ -147,8 +218,6 @@ try {
         Select-Object Name, DisplayName, @{ Name = 'Status'; Expression = { $_.Status.ToString() } })
 } catch { $report.serviceError = $_.Exception.Message }
 
-$settings = Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction SilentlyContinue
-$effectiveProxy = Resolve-ProxyUrl -Explicit $ProxyUrl -Settings $settings
 $report.systemProxy = [pscustomobject]@{
     enabled = ($settings.ProxyEnable -eq 1)
     pacConfigured = [bool]$settings.AutoConfigURL
@@ -175,18 +244,20 @@ foreach ($name in @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'WS_PROXY', 'WSS_P
 
 if ($effectiveProxy) {
     $proxyUri = [uri]$effectiveProxy
-    if ($proxyUri.Host -in @('127.0.0.1', 'localhost', '::1')) {
+    if (Test-IsLoopbackHost -HostName $proxyUri.DnsSafeHost) {
         try {
             $report.proxyListener = [pscustomobject]@{
                 host = $proxyUri.Host
                 port = $proxyUri.Port
-                listening = [bool](Test-NetConnection -ComputerName $proxyUri.Host -Port $proxyUri.Port -InformationLevel Quiet -WarningAction SilentlyContinue)
+                listening = Test-LocalProxyListener -ComputerName $proxyUri.DnsSafeHost -Port $proxyUri.Port
             }
         } catch { $report.proxyListenerError = $_.Exception.Message }
     }
 }
 
-$report.probes += Invoke-EndpointProbe -Label 'direct' -Url $Endpoint
-if ($effectiveProxy) { $report.probes += Invoke-EndpointProbe -Label 'explicit-proxy' -Url $Endpoint -Proxy $effectiveProxy }
+if (-not $SkipProbes) {
+    $report.probes += Invoke-EndpointProbe -Label 'direct' -Url $endpointUri.AbsoluteUri
+    if ($effectiveProxy) { $report.probes += Invoke-EndpointProbe -Label 'explicit-proxy' -Url $endpointUri.AbsoluteUri -Proxy $effectiveProxy }
+}
 
 [pscustomobject]$report | ConvertTo-Json -Depth 6

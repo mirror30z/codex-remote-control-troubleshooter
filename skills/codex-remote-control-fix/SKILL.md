@@ -9,6 +9,10 @@ Help the user get a Windows host connected to Codex on their phone. Diagnose the
 
 ## Start with the failure stage
 
+Record the exact error, reproduction time, Windows and desktop/mobile app versions, account/workspace match (no account IDs), proxy/VPN product and active mode, and whether pairing ever worked. Reuse supplied details; ask only for missing facts that affect the next step. Confirm commands run on the affected Windows host, not a cloud container, WSL, or phone. If that host is unavailable, provide the relevant commands and mark host checks as pending.
+
+Start with the desktop connection setting, sign-in, updates, and sleep state. Signing out turns Remote Control off while preserving pairings; enable it again after signing in. For an error after enabling and selecting Add, the official guide recommends restarting the desktop app and retrying; first preserve active work. Mobile setup starts in the desktop app, not the CLI or IDE. Route SSH remote-project failures to a separate workflow.
+
 - **“无法启用远程控制。请重试” after Allow:** investigate the host's network path and app errors.
 - **“无法更新远程控制状态” / “Couldn't update remote control availability”:** pairing may exist while the host cannot publish availability; inspect the Remote Control WebSocket path and fresh app errors.
 - **QR code appears but pairing fails:** check that phone and host use the same ChatGPT account and workspace, finish MFA/SSO/passkey prompts, and retry pairing.
@@ -18,7 +22,9 @@ Use the current [OpenAI Remote connections guide](https://learn.chatgpt.com/docs
 
 ## Collect read-only evidence
 
-On Windows, run [scripts/diagnose.ps1](scripts/diagnose.ps1) from this skill directory. It reports DNS A/AAAA answers for `chatgpt.com`, selected routes, configured adapter DNS servers, relevant virtual adapters and services, Codex/ChatGPT process state and TCP connections to the currently resolved addresses, the local system proxy and listener, and a short direct/explicit-proxy reachability comparison for the Remote Control endpoint. The optional `-DnsServer <server>` compares a known proxy DNS server with the Windows default; `-ProxyUrl <url>` tests a user-supplied proxy when the system proxy is not parseable. It does not alter network settings or read app credentials. If script execution is restricted, inspect the script and run the needed read-only commands individually; do not weaken system policy merely to run this skill.
+On the affected Windows host, run [scripts/diagnose.ps1](scripts/diagnose.ps1) with Windows PowerShell 5.1 or PowerShell 7. Start without elevation; treat unavailable commands or access-denied sections as missing evidence, not an empty result. It reports DNS A/AAAA answers for the endpoint's host, selected routes, configured adapter DNS servers, relevant virtual adapters and services, Codex/ChatGPT process state and TCP connections to the currently resolved addresses, the local system proxy and listener, and a short direct/explicit-proxy reachability comparison. `-DnsServer <server>` compares a known proxy DNS server with the Windows default; `-ProxyUrl <url>` tests a user-supplied HTTP(S)/SOCKS5 proxy without credentials when the system proxy is not parseable. `-SkipProbes` omits endpoint HTTP requests. It does not alter network settings or read app credentials. If script execution is restricted, inspect it and run the needed read-only commands individually; do not weaken system policy merely to run this skill.
+
+The default `/backend-api/wham/remote/control/server` path is an observed internal endpoint, not a stable public API. A `404`/`410` may indicate a changed path. Verify the current path from recent local app errors or current sources before using `-Endpoint <https URL>`; never include tokens, query strings, or credentials.
 
 If the user already supplied equivalent, recent diagnostics, use them instead. Recheck after VPN, proxy, or TUN state changes; a route table from a different state cannot prove a present conflict.
 
@@ -37,6 +43,10 @@ When needed, inspect only recent Codex desktop log entries around the user's fai
 
 Network changes can interrupt work. Preserve the user's existing access requirements and provide a rollback for any change to a VPN, proxy mode, Fake-IP range, route, or firewall rule. Avoid disabling an enterprise VPN during active work without the user's direction.
 
+Label each conclusion **confirmed**, **suspected**, or **unknown**. A working explicit proxy only confirms that probe's path; application proxy bypass remains suspected until fresh app evidence supports it. An empty process connection list can miss helper processes, cached DNS addresses, local proxy connections, or non-TCP traffic. Do not conclude the app is disconnected from that absence alone. Missing `curl.exe`, PAC-only settings, denied queries, and skipped probes are unknowns. Stop speculative network edits when evidence is insufficient; collect the next missing check or prepare a redacted report for support. Never disable TLS validation, the firewall, or authentication as a diagnostic shortcut.
+
 ## Verify completion
 
 After a change, compare the same probes again, then have the user enable Remote Control in the desktop app. Success requires the desktop to accept the setting, pairing to complete if needed, the phone to show the host online, and one real action from the phone. A changed DNS answer, HTTP response, or live local process alone is only an intermediate check. Report what was observed, what remains uncertain, and how to undo the change if it fails.
+
+Return a compact report in the user's language: failure stage; evidence and confidence; one selected change with the previous value and rollback; verification results; pending checks. If the phone is unavailable, explicitly leave end-to-end success unverified. Read [references/diagnosis-branches.md](references/diagnosis-branches.md) for rollback details and interpretation limits.

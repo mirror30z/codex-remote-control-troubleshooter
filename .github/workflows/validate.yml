@@ -1,0 +1,18 @@
+name: Validate diagnostic skill
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  powershell:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        shell: [powershell, pwsh]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate parser, regression cases, and Windows JSON output
+        shell: ${{ matrix.shell }}
+        run: ./tests/diagnose.Tests.ps1
